@@ -1,0 +1,17 @@
+# Discord bot
+discord.py>=2.3.0
+
+# Async HTTP requests
+aiohttp>=3.9.0
+
+# JSON handling (built-in, but listing for clarity)
+# json - built-in
+
+# File operations (built-in)
+# os - built-in
+
+# Async operations (built-in)
+# asyncio - built-in
+
+# Logging (built-in)
+# logging - built-in
