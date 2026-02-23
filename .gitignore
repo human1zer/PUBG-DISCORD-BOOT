@@ -1,0 +1,10 @@
+# Logs and runtime
+*.log
+*.json
+*.txt
+downloaded_images/
+venv/
+
+# Ignore temp / OS files
+*.pyc
+__pycache__/

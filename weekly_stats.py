@@ -10,34 +10,26 @@ from datetime import datetime, timedelta, timezone
 import discord
 
 
+
+
+
+
 class WeeklyStatsManager:
     """Manages match history and weekly statistics"""
     
     def __init__(self, max_history=500):
-        """
-        Initialize stats manager
-        
-        Args:
-            max_history: Maximum number of matches to keep in history
-        """
         self.max_history = max_history
         self.history_file = "match_history.json"
+        self.history_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "match_history.json")
+
     
     def save_match_history(self, new_matches):
-        """
-        Save detailed match history for stats tracking
-        
-        Args:
-            new_matches: List of match data dictionaries from tracker
-        """
         try:
-            # Load existing history
             history = []
             if os.path.exists(self.history_file):
                 with open(self.history_file, 'r', encoding='utf-8') as f:
                     history = json.load(f)
             
-            # Add new matches from this cycle
             for match in new_matches:
                 history.append({
                     'match_id': match['match_id'],
@@ -49,10 +41,8 @@ class WeeklyStatsManager:
                     'category': match['match_category']
                 })
             
-            # Keep only recent matches
             history = history[-self.max_history:]
             
-            # Save
             with open(self.history_file, 'w', encoding='utf-8') as f:
                 json.dump(history, f, indent=2)
             
@@ -63,15 +53,6 @@ class WeeklyStatsManager:
             traceback.print_exc()
     
     def calculate_weekly_best(self, days=7):
-        """
-        Find the best player from the last N days
-        
-        Args:
-            days: Number of days to look back (default: 7)
-            
-        Returns:
-            Dictionary with best player stats or None
-        """
         if not os.path.exists(self.history_file):
             print(f"⚠️ No match history found at {self.history_file}")
             return None
@@ -80,28 +61,35 @@ class WeeklyStatsManager:
             with open(self.history_file, 'r', encoding='utf-8') as f:
                 history = json.load(f)
             
-            from datetime import timezone
             cutoff_time = datetime.now(timezone.utc) - timedelta(days=days)
-            
-            # Filter matches from last N days
+
+            EXCLUDED_CATEGORIES = {"CASUAL", "ARCADE"}
+
             recent_matches = []
             for match in history:
                 try:
+                    category = match.get('category', '').upper()
+                    if any(excl in category for excl in EXCLUDED_CATEGORIES) or 'AIROYALE' in category:
+                        continue
+
                     match_time = datetime.fromisoformat(match['timestamp'].replace('Z', '+00:00'))
                     if match_time >= cutoff_time:
                         recent_matches.append(match)
                 except Exception as e:
                     print(f"⚠️ Error parsing timestamp: {e}")
                     continue
-            
+
             if not recent_matches:
                 print(f"⚠️ No matches found in the last {days} days")
                 return None
             
             print(f"📊 Analyzing {len(recent_matches)} matches from the last {days} days...")
             
-            # Calculate stats per player
             player_stats = {}
+            
+            # ── Track ALL longest kill entries per player for top-3 ──────────
+            # longest_kills_pool: list of (distance, player_name) across all matches
+            longest_kills_pool = []
             
             for match in recent_matches:
                 player = match['player_name']
@@ -122,7 +110,8 @@ class WeeklyStatsManager:
                         'best_kills': 0,
                         'best_damage': 0,
                         'best_survival': 0,
-                        'total_distance': 0
+                        'total_distance': 0,
+                        'longest_kill': 0
                     }
                 
                 ps = player_stats[player]
@@ -134,12 +123,10 @@ class WeeklyStatsManager:
                 ps['total_assists'] += stats.get('assists', 0)
                 ps['total_dbnos'] += stats.get('dbnos', 0)
                 
-                # Distance traveled
                 walk = stats.get('walk_distance', 0)
                 ride = stats.get('ride_distance', 0)
-                ps['total_distance'] += (walk + ride) / 1000  # Convert to km
+                ps['total_distance'] += (walk + ride) / 1000
                 
-                # Rankings
                 rank = stats.get('rank', 99)
                 if rank == 1:
                     ps['wins'] += 1
@@ -148,13 +135,31 @@ class WeeklyStatsManager:
                 if rank <= 10:
                     ps['top_10'] += 1
                 
-                # Track best performances
                 if stats.get('kills', 0) > ps['best_kills']:
                     ps['best_kills'] = stats.get('kills', 0)
                 if stats.get('damage_dealt', 0) > ps['best_damage']:
                     ps['best_damage'] = stats.get('damage_dealt', 0)
                 if stats.get('survival_time_minutes', 0) > ps['best_survival']:
                     ps['best_survival'] = stats.get('survival_time_minutes', 0)
+                if stats.get('longest_kill', 0) > ps['longest_kill']:
+                    ps['longest_kill'] = stats.get('longest_kill', 0)
+                
+                # Add this match's longest_kill to the global pool
+                kill_dist = stats.get('longest_kill', 0)
+                if kill_dist > 0:
+                    longest_kills_pool.append((kill_dist, player))
+            
+            # ── Build top-3 longest kills (one entry per player max) ─────────
+            # Sort descending, then pick best entry per player, take top 3
+            longest_kills_pool.sort(key=lambda x: x[0], reverse=True)
+            seen_players = set()
+            top3_longest_kills = []
+            for dist, pname in longest_kills_pool:
+                if pname not in seen_players:
+                    top3_longest_kills.append({'player': pname, 'distance': dist})
+                    seen_players.add(pname)
+                if len(top3_longest_kills) == 3:
+                    break
             
             # Calculate averages and score
             for player, stats in player_stats.items():
@@ -166,34 +171,31 @@ class WeeklyStatsManager:
                 stats['win_rate'] = round((stats['wins'] / matches) * 100, 1)
                 stats['top_5_rate'] = round((stats['top_5'] / matches) * 100, 1)
                 
-                # Calculate overall score (weighted)
-                # You can adjust these weights to your preference
                 stats['score'] = (
-                    stats['avg_kills'] * 100 +           # Kills are important
-                    stats['avg_damage'] * 0.5 +          # Damage matters
-                    stats['wins'] * 500 +                # Wins are very valuable
-                    stats['top_5'] * 100 +               # Top 5 finishes
-                    stats['top_10'] * 50 +               # Top 10 finishes
-                    stats['avg_survival'] * 10 +         # Survival time
-                    stats['total_headshots'] * 20        # Headshots bonus
+                    stats['avg_kills'] * 100 +
+                    stats['avg_damage'] * 0.5 +
+                    stats['wins'] * 500 +
+                    stats['top_5'] * 100 +
+                    stats['top_10'] * 50 +
+                    stats['avg_survival'] * 10 +
+                    stats['total_headshots'] * 20
                 )
             
-            # Find best player
             if not player_stats:
                 return None
             
             best_player = max(player_stats.items(), key=lambda x: x[1]['score'])
             
-            # Sort all players by score
             sorted_players = sorted(
-                player_stats.items(), 
-                key=lambda x: x[1]['score'], 
+                player_stats.items(),
+                key=lambda x: x[1]['score'],
                 reverse=True
             )
             
             return {
                 'player': best_player[0],
                 'stats': best_player[1],
+                'top3_longest_kills': top3_longest_kills,   # ← NEW: list of 3
                 'all_players': dict(sorted_players),
                 'days': days,
                 'total_matches': len(recent_matches)
@@ -204,19 +206,15 @@ class WeeklyStatsManager:
             traceback.print_exc()
             return None
     
+    # ──────────────────────────────────────────────────────────────────────────
+    #  EMBED BUILDERS
+    # ──────────────────────────────────────────────────────────────────────────
+
     def create_weekly_embed(self, weekly_data):
-        """
-        Create Discord embed for weekly best player
-        
-        Args:
-            weekly_data: Dictionary returned from calculate_weekly_best()
-            
-        Returns:
-            discord.Embed object
-        """
         player = weekly_data['player']
         stats = weekly_data['stats']
         days = weekly_data['days']
+        top3 = weekly_data.get('top3_longest_kills', [])
         
         embed = discord.Embed(
             title=f"🏆 Best Player - Last {days} Days",
@@ -225,7 +223,6 @@ class WeeklyStatsManager:
             timestamp=datetime.now()
         )
         
-        # Match stats
         embed.add_field(
             name="📋 Matches Played",
             value=f"**Total:** {stats['matches']}\n"
@@ -235,7 +232,6 @@ class WeeklyStatsManager:
             inline=True
         )
         
-        # Combat stats
         embed.add_field(
             name="⚔️ Combat Stats",
             value=f"**Avg Kills:** {stats['avg_kills']}\n"
@@ -245,7 +241,6 @@ class WeeklyStatsManager:
             inline=True
         )
         
-        # Damage stats
         embed.add_field(
             name="💥 Damage Dealt",
             value=f"**Avg:** {stats['avg_damage']}\n"
@@ -254,7 +249,6 @@ class WeeklyStatsManager:
             inline=True
         )
         
-        # Support stats
         embed.add_field(
             name="🤝 Support",
             value=f"**Assists:** {stats['total_assists']}\n"
@@ -262,7 +256,6 @@ class WeeklyStatsManager:
             inline=True
         )
         
-        # Survival
         embed.add_field(
             name="⏱️ Survival Time",
             value=f"**Avg:** {stats['avg_survival']} min\n"
@@ -271,7 +264,6 @@ class WeeklyStatsManager:
             inline=True
         )
         
-        # Movement
         embed.add_field(
             name="🗺️ Distance",
             value=f"**Avg:** {stats['avg_distance']} km\n"
@@ -279,28 +271,30 @@ class WeeklyStatsManager:
             inline=True
         )
         
-        # Score
         embed.add_field(
             name="🎯 Overall Score",
             value=f"**{round(stats['score'], 0)}** points",
             inline=False
         )
         
+        # ── Top 3 Longest Kills ───────────────────────────────────────────────
+        medals = ["🥇", "🥈", "🥉"]
+        if top3:
+            lines = []
+            for i, entry in enumerate(top3):
+                medal = medals[i] if i < len(medals) else f"{i+1}."
+                lines.append(f"{medal} **{entry['player']}**: {round(entry['distance'], 0)}m")
+            embed.add_field(
+                name="🔭 Top 3 Longest Kills of the Week",
+                value="\n".join(lines),
+                inline=False
+            )
+        
         embed.set_footer(text=f"Calculated from {weekly_data['total_matches']} matches")
         
         return embed
     
     def create_leaderboard_embed(self, weekly_data, top_n=5):
-        """
-        Create a leaderboard embed showing top N players
-        
-        Args:
-            weekly_data: Dictionary returned from calculate_weekly_best()
-            top_n: Number of top players to show (default: 5)
-            
-        Returns:
-            discord.Embed object
-        """
         days = weekly_data['days']
         all_players = weekly_data['all_players']
         
@@ -315,7 +309,6 @@ class WeeklyStatsManager:
         
         for idx, (player, stats) in enumerate(list(all_players.items())[:top_n]):
             medal = medals[idx] if idx < len(medals) else f"{idx+1}."
-            
             embed.add_field(
                 name=f"{medal} {player}",
                 value=f"**Score:** {round(stats['score'], 0)}\n"
@@ -328,29 +321,133 @@ class WeeklyStatsManager:
         
         return embed
     
-    def get_player_summary(self, player_name, days=7):
+    # ──────────────────────────────────────────────────────────────────────────
+    #  TEST MODE  ← NEW
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def save_weekly_report_to_txt(self, days=7, output_file="weekly_report_test.txt"):
         """
-        Get individual player stats for the last N days
-        
+        Run the full weekly calculation and save the result to a .txt file
+        instead of posting to Discord. Useful for local testing anytime.
+
         Args:
-            player_name: Name of the player
-            days: Number of days to look back
-            
-        Returns:
-            Dictionary with player stats or None
+            days: Number of days to look back (default: 7)
+            output_file: Path to the output .txt file
         """
         weekly_data = self.calculate_weekly_best(days)
         
         if not weekly_data:
+            print("⚠️ No data to write — check your match_history.json")
+            return
+        
+        player  = weekly_data['player']
+        stats   = weekly_data['stats']
+        top3    = weekly_data.get('top3_longest_kills', [])
+        all_pl  = weekly_data['all_players']
+        medals  = ["🥇", "🥈", "🥉"]
+
+        lines = []
+        sep = "=" * 50
+
+        # ── Header ────────────────────────────────────────────────────────────
+        lines.append(sep)
+        lines.append(f"  🏆 BEST PLAYER — Last {days} Days")
+        lines.append(f"  Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append(sep)
+        lines.append(f"  Winner: {player}")
+        lines.append("")
+
+        # ── Match stats ───────────────────────────────────────────────────────
+        lines.append("📋 MATCHES")
+        lines.append(f"  Total:    {stats['matches']}")
+        lines.append(f"  Wins:     {stats['wins']} 🏆")
+        lines.append(f"  Top 5:    {stats['top_5']} ({stats['top_5_rate']}%)")
+        lines.append(f"  Win Rate: {stats['win_rate']}%")
+        lines.append("")
+
+        # ── Combat ────────────────────────────────────────────────────────────
+        lines.append("⚔️ COMBAT")
+        lines.append(f"  Avg Kills:    {stats['avg_kills']}")
+        lines.append(f"  Best Game:    {stats['best_kills']} kills")
+        lines.append(f"  Total Kills:  {stats['total_kills']}")
+        lines.append(f"  Headshots:    {stats['total_headshots']}")
+        lines.append("")
+
+        # ── Damage ────────────────────────────────────────────────────────────
+        lines.append("💥 DAMAGE")
+        lines.append(f"  Avg:   {stats['avg_damage']}")
+        lines.append(f"  Best:  {round(stats['best_damage'], 0)}")
+        lines.append(f"  Total: {round(stats['total_damage'], 0)}")
+        lines.append("")
+
+        # ── Support ───────────────────────────────────────────────────────────
+        lines.append("🤝 SUPPORT")
+        lines.append(f"  Assists:    {stats['total_assists']}")
+        lines.append(f"  Knockdowns: {stats['total_dbnos']}")
+        lines.append("")
+
+        # ── Survival ──────────────────────────────────────────────────────────
+        lines.append("⏱️ SURVIVAL")
+        lines.append(f"  Avg:   {stats['avg_survival']} min")
+        lines.append(f"  Best:  {round(stats['best_survival'], 1)} min")
+        lines.append(f"  Total: {round(stats['total_survival'] / 60, 1)} hours")
+        lines.append("")
+
+        # ── Distance ──────────────────────────────────────────────────────────
+        lines.append("🗺️ DISTANCE")
+        lines.append(f"  Avg:   {stats['avg_distance']} km")
+        lines.append(f"  Total: {round(stats['total_distance'], 1)} km")
+        lines.append("")
+
+        # ── Score ─────────────────────────────────────────────────────────────
+        lines.append(f"🎯 OVERALL SCORE: {round(stats['score'], 0)} points")
+        lines.append("")
+
+        # ── Top 3 Longest Kills ───────────────────────────────────────────────
+        lines.append("🔭 TOP 3 LONGEST KILLS")
+        if top3:
+            for i, entry in enumerate(top3):
+                medal = medals[i] if i < len(medals) else f"{i+1}."
+                lines.append(f"  {medal} {entry['player']}: {round(entry['distance'], 0)}m")
+        else:
+            lines.append("  No data")
+        lines.append("")
+
+        # ── Leaderboard ───────────────────────────────────────────────────────
+        lines.append(sep)
+        lines.append("  📊 FULL LEADERBOARD")
+        lines.append(sep)
+        lb_medals = ["🥇", "🥈", "🥉", "4.", "5.", "6.", "7.", "8.", "9.", "10."]
+        for idx, (pname, pstats) in enumerate(all_pl.items()):
+            m = lb_medals[idx] if idx < len(lb_medals) else f"{idx+1}."
+            lines.append(
+                f"  {m} {pname:20s}  Score: {round(pstats['score'],0):>8}  "
+                f"Matches: {pstats['matches']:>3}  Wins: {pstats['wins']:>3}  "
+                f"AvgK: {pstats['avg_kills']:>5}  AvgDmg: {round(pstats['avg_damage'],0):>7}"
+            )
+        lines.append("")
+        lines.append(f"Total matches analysed: {weekly_data['total_matches']}")
+        lines.append(sep)
+
+        # ── Write file ────────────────────────────────────────────────────────
+        with open(output_file, 'w', encoding='utf-8') as f:
+            f.write("\n".join(lines))
+        
+        print(f"✅ Test report saved to '{output_file}'")
+
+    # ──────────────────────────────────────────────────────────────────────────
+    #  PLAYER SUMMARY
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def get_player_summary(self, player_name, days=7):
+        weekly_data = self.calculate_weekly_best(days)
+        if not weekly_data:
             return None
         
         all_players = weekly_data['all_players']
-        
         for player, stats in all_players.items():
             if player.lower() == player_name.lower():
-                # Find rank
                 rank = list(all_players.keys()).index(player) + 1
-                
                 return {
                     'player': player,
                     'stats': stats,
@@ -358,26 +455,15 @@ class WeeklyStatsManager:
                     'total_players': len(all_players),
                     'days': days
                 }
-        
         return None
     
     def create_player_summary_embed(self, player_data):
-        """
-        Create embed for individual player summary
-        
-        Args:
-            player_data: Dictionary from get_player_summary()
-            
-        Returns:
-            discord.Embed object
-        """
         player = player_data['player']
-        stats = player_data['stats']
-        rank = player_data['rank']
-        total = player_data['total_players']
-        days = player_data['days']
+        stats  = player_data['stats']
+        rank   = player_data['rank']
+        total  = player_data['total_players']
+        days   = player_data['days']
         
-        # Determine color based on rank
         if rank == 1:
             color = discord.Color.gold()
         elif rank <= 3:
@@ -394,7 +480,6 @@ class WeeklyStatsManager:
             timestamp=datetime.now()
         )
         
-        # Performance overview
         embed.add_field(
             name="🎮 Performance",
             value=f"**Matches:** {stats['matches']}\n"
@@ -404,7 +489,6 @@ class WeeklyStatsManager:
             inline=True
         )
         
-        # Combat
         embed.add_field(
             name="⚔️ Combat",
             value=f"**Avg Kills:** {stats['avg_kills']}\n"
@@ -414,7 +498,6 @@ class WeeklyStatsManager:
             inline=True
         )
         
-        # Other
         embed.add_field(
             name="📈 Stats",
             value=f"**Avg Survival:** {stats['avg_survival']} min\n"
@@ -425,3 +508,26 @@ class WeeklyStatsManager:
         )
         
         return embed
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  QUICK TEST — run this file directly:  python weekly_stats.py
+# ══════════════════════════════════════════════════════════════════════════════
+if __name__ == "__main__":
+    import sys
+
+    manager = WeeklyStatsManager()
+
+    # Optional: pass --days N on the command line, e.g.  python weekly_stats.py --days 14
+    days = 7
+    output = "weekly_report_test.txt"
+    for i, arg in enumerate(sys.argv[1:]):
+        if arg == "--days" and i + 1 < len(sys.argv) - 1:
+            days = int(sys.argv[i + 2])
+        if arg == "--out" and i + 1 < len(sys.argv) - 1:
+            output = sys.argv[i + 2]
+
+    print(f"🧪 Running test mode (last {days} days) → {output}")
+    manager.save_weekly_report_to_txt(days=days, output_file=output)
+
+    
